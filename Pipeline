@@ -1,0 +1,475 @@
+# For complete pipeline and donor details please contact Dr. Biancastella Cereser (B.Cereser@imperial.ac.uk)
+
+# Abbreviations
+# par, parous; str, stroma; epi, epithilium; str, stroma; chr, chromosome
+
+# Whole genom sequencing
+# chromosome “chr"
+system("samtools view in.bam chr -b > out.bam") # alternatively system*"bamtools split -in file.bam -reference")
+system("samtools  index *.bam")
+
+# CNV Calling using cn.MOPS
+library(cn.mops)
+sampleID <-  paste("sampleName",c(1:17),sep = "")
+
+# Get read counts from BAM files
+# chromosome “chr"
+# substitute “chr” with the chromosome number and sampleID with the vector containing your sample names
+BAMFiles.chr <- list.files(pattern = "chr.bam$")
+bamDataRanges.chr <- getReadCountsFromBAM(BAMFiles.chr, sampleNames = c(sampleID),refSeqNames = "chr")
+
+# Parous and nulliparou cohort
+# Do this for both parous and nulliparous individuals separately. 
+# CNV calling: referencecn.mops()
+# Epithial compartment: case = epithelium, control = stroma
+# Repeat this for Stromal compartment: case = stroma, control = epithelium
+# Parity = parous/nulliparous; compartment epithelial/stromal
+ref_analysis.chr.parity.compartment <- referencecn.mops(case = bamDataRanges.chr[,c(sampleID.par.epi)], control = bamDataRanges.chr[,c(sampleID.par.str)],
+                                                        norm = 1, I = c(0.025,0.5,1,1.5,2,2.5,3,3.5,4,8,16,32,64), classes = paste("CN",c(0:8,16,32,64,128),sep=""), segAlgorithm = "DNAcopy", priorImpact = 1000000)
+
+# CNV integer counting
+CNMOPS.chr.parity.compartment <- calcIntegerCopyNumbers(ref_analysis.chr.parity.compartment)
+
+# Identification of CNVRs and allocation of copy number integer
+chr.CNVR <- cnvr(CNMOPS.chr.parity.compartment)
+
+# Identification of CNVs
+chr.CNVs.parity.compartment <- cnvs(CNMOPS.chr.parity.compartment)
+
+##########################################################################################
+##########################################################################################
+
+# Merge all CNV calls (one from each chromosomes)
+# Grab all data from cnvr() for respective and comparment into one data frame
+# Apply for both cohort and for each compartment separately
+require(data.table)
+df.CNVRs.parity.compartment <- rbind(as.data.frame(CNMOPS.chr.parity.compartment))
+
+# Put NAs in CNVR that are diploid
+df.CNVRs.parity.compartment[df.CNVRs.parity.compartment == "CN2"] <- NA
+df.CNVRs.parity.compartment[df.CNVRs.parity.compartment == ""] <- NA
+df.CNVRs.parity.compartment <- data.frame(lapply(as.data.frame(df.CNVRs.parity.compartment),function (x){gsub("CN","",x)}))
+
+##########################################################################################
+##########################################################################################
+
+# Total CNVs in the breast epithelium, irrespective of parity
+# Merge CNVRs in the epithelial compart from parous and nulliparou cohort 
+# Assuming, raw.df.CNVRs.parity.compartment <- rbind(df.CNVRs.parous.epithelial, df.CNVRs.nulliparous.epithelial)
+library(tidyr)
+raw.df.CNVRs.parity.compartment$concatonate <- paste(raw.df.CNVRs.parity.compartment$seqnames, raw.df.CNVRs.parity.compartment$start, raw.df.CNVRs.parity.compartment$end, sep = "")
+raw.df.CNVRs.parity.compartment.count <- raw.df.CNVRs.parity.compartment[!duplicated(raw.df.CNVRs.parity.compartment$concatonate),]
+dim(raw.df.CNVRs.parity.compartment.count)
+
+##########################################################################################
+##########################################################################################
+
+# Acquiring telomeric and centromeric regions
+library("dplyr")
+system("curl -s 'http://hgdownload.soe.ucsc.edu/goldenPath/hg19/database/cytoBandIdeo.txt.gz' | gunzip -c | grep acen > centromeres.txt")
+centromeres <- as.data.frame(read.table("centromeres.txt", header = FALSE, sep="\t", stringsAsFactors=FALSE, quote=""))
+centromeres <- centromeres[,-c(4:5)]
+
+# Increasing the length of each end of centromeres by 100 kbp for filtering
+# i.e., CNVs lies/overlaps within 100 kbp of centromeres are removed
+# centromeres
+centromeres <- mutate(centromeres, start = V2 - 100000)
+centromeres <- mutate(centromeres, end = V3 + 100000)
+centromeres <- centromeres[,-c(2:3)]
+colnames(centromeres) <- c("chrom","start","end")
+centromeres$location <- "centromere"
+
+# telomeres
+# coordinates based here: https://www.ncbi.nlm.nih.gov/grc/human/data?asm=GRCh37.p13
+# Chromosome Y was excluded
+# telomeres.A (starts of each chromosomes)
+telomeres.A<- data.frame(rep(paste("chr",c(c(1:22),"X"), sep = "")))
+telomeres.A$start <- rep(c(1),23)
+telomeres.A$end <- as.numeric(rep(c(100000),23))
+colnames(telomeres.A) <- c("chrom","start","end")
+telomeres.A$location <- "telomere"
+
+# telomeres.B (end of each chromosomes)
+# Column names for telomeres: start = end of the chrom, end = 100 kbp of telomere
+telomeres.B<- data.frame(rep(paste("chr",c(c(1:22),"X"), sep = "")))
+telomeres.B$A <- as.numeric(c("249250621", "243199373", "198022430", "191154276", "180915260",
+                              "171115067", "159138663", "146364022", "141213431", "135534747",
+                              "135006516", "133851895", "115169878", "107349540", "102531392",
+                              "90354753", "81195210", "78077248", "59128983", "63025520", "48129895",
+                              "51304566","155270560"))
+telomeres.B <- mutate(telomeres.B, end = A - 100000)
+telomeres.B <- telomeres.B[,c(1,3,2)]
+colnames(telomeres.B) <- c("chrom","start","end")
+telomeres.B$location <- "telomere"
+
+centro.telo <- rbind(centromeres,telomeres.A,telomeres.B) # Bind centromere and telomeres
+options(scipen=999) # prevent scientific notations
+
+##########################################################################################
+##########################################################################################
+
+# Create BED files for BEDTools
+# centromere and telomere BED file
+write.table(as.data.frame(centro.telo), file = "centro_telo.bed", sep = "\t",row.names = F, quote = F, col.names = F)
+
+# Produce a BED files for all the CNVRs in Parous and Nulliparous from both compartments. Do this separately
+write.table(as.data.frame(df.CNVRs.parity.compartment), file = "all_cnvrs_parity_compartment.bed", sep = "\t",row.names = F, quote = F, col.names = F)
+
+##########################################################################################
+##########################################################################################
+
+# Filter CNVs near centromeric and telomeric regions
+# Apply for both cohort and for each compartment separately
+system("bedtools intersect -v -a all_cnvrs_parity_compartment.bed -b centro_telo.bed > filt_cnvrs_parity_compartment.bed")
+filtered.cnvr.parity.compartment <- as.data.frame(read.table("filt_cnvrs_parity_compartment.bed", header = FALSE, sep="\t", stringsAsFactors=FALSE, quote=""))
+colnames(filt.cnvr.parity.compartment) <- c(colnames(filtered.cnvr.parity.compartment))
+
+##########################################################################################
+##########################################################################################
+
+# Filter Germline CNVR per Donor
+# From matched/paired sample, remove CNVRs from Epithelial compartment that was also detected from stromal comparment (>70% overlap)
+# Do this for both parous and nulliparous individuals separately. 
+# e.g., Paired samples for each donor
+cnvr.sampleID.parity.matched.epithelium <- filt.cnvr.parity.epithelial[,c("seqnames","start","end","sampleID")]
+cnvr.sampleID.parity.matched.stroma <- filt.cnvr.parity.stromal[,c("seqnames","start","end","sampleID")]
+cnvr.sampleID.parity.matched.epithelium <- cnvr.sampleID.parity.matched.epithelium[!is.na(cnvr.sampleID.parity.matched.epithelium$sampleID),]
+cnvr.sampleID.parity.matched.stroma <- cnvr.sampleID.parity.matched.stroma[!is.na(cnvr.sampleID.parity.matched.stroma$sampleID),]
+write.table(as.data.frame(cnvr.sampleID.parity.matched.epithelium), file = "cnvr_sampleID__parity_matched_epithelium.bed", sep = "\t",row.names = F, quote = F, col.names = F)
+write.table(as.data.frame(cnvr.sampleID.parity.matched.stroma), file = "cnvr_sampleID_parity_matched_stroma.bed", sep = "\t",row.names = F, quote = F, col.names = F)
+system("bedtools intersect -v -f 0.7 -r -a cnvr_sampleID__parity_matched_epithelium.bed -b cnvr_sampleID_parity_matched_stroma.bed > germline_filtered_cnvr__parity_sampleID.bed")
+germline.filtered.cnvr.parity.sampleID <- as.data.frame(read.table("germline_filtered_cnvr__parity_sampleID.bed", header = FALSE, sep="\t", stringsAsFactors=FALSE, quote=""))
+germline.filtered.cnvr.parity.sampleID$PXID <- "sampleID"
+colnames(germline.filtered.cnvr.parity.sampleID) <- c("seqnames","start","end","cnvr","PXID")
+
+
+# Bind CNVs that are filtered with germline CNVs, centromeric and telomeric regions
+# Merge filtered CNVR from each individual into one data frame
+# Apply for both cohort separately
+result.parity.raw <- rbind(as.data.frame(germline.filtered.cnvr.parity.sampleID))
+result.parity.raw <- pivot_wider(result.parity.raw, names_from = PXID, values_from = cnvr)
+
+##########################################################################################
+##########################################################################################
+
+# Filtering Common CNVRs
+# Acquire common CNVs from: http://dgv.tcag.ca/dgv/docs/GRCh37_hg19_variants_2020-02-25.txt
+system("wget http://dgv.tcag.ca/dgv/docs/GRCh37_hg19_variants_2020-02-25.txt")
+GRCh37_hg19_variants <- read.delim2("GRCh37_hg19_variants_2020-02-25.txt")
+GRCh37_hg19_variants <- GRCh37_hg19_variants[,c(2:ncol(GRCh37_hg19_variants),1)]
+colnames(GRCh37_hg19_variants) <- c("seqnames",colnames(GRCh37_hg19_variants[,c(2:ncol(GRCh37_hg19_variants))]))
+GRCh37_hg19_variants$seqnames <- paste("chr",GRCh37_hg19_variants$seqnames, sep = "")
+
+# Only include 1000 genomes project, Genome Aggregation Database (gnomAD_Structural_Variants)
+GRCh37_hg19_variants <- GRCh37_hg19_variants[which(c(GRCh37_hg19_variants$reference == "1000_Genomes_Consortium_Pilot_Project" | 
+                                                       GRCh37_hg19_variants$reference == "1000_Genomes_Consortium_Phase_3" |
+                                                       GRCh37_hg19_variants$reference == "1000_Genomes_Consortium_Phase_1" |
+                                                       GRCh37_hg19_variants$reference == "gnomAD_Structural_Variants")),]
+write.table(as.data.frame(GRCh37_hg19_variants), file = "GRCh37_hg19_variants.bed", 
+            sep = "\t",row.names = F, quote = F, col.names = F) 
+
+# Pipe filtered CNVRs to remove common CNVRs
+# Remove CNVRs from our data frame that overlapped with known common CNVRs by at least 70%
+# Apply for both cohort separately
+write.table(as.data.frame(result.parity.raw), file = "result_parity_raw.bed", sep = "\t",row.names = F, quote = F, col.names = F) 
+system("bedtools intersect -v -f 0.7 -a result_parity_raw.bed -b GRCh37_hg19_variants.bed > result_parity_common_cnvr_filtered.bed")
+result.parity.common.cnvr.filtered <- as.data.frame(read.table("result_parity_common_cnvr_filtered.bed", header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+colnames(result.parity.common.cnvr.filtered) <- colnames(result.parity.raw)
+
+# Further filter using UCSC Genome Browser (HG19 and HG38) - Gap Track and RepeatMasker Track.
+# Manual curate. Further filter CNVRs that are mapped to:
+# Excluded CNVs mapped to centromeres, telomeres, heterochromatin gaps and blocks of repeats
+
+##########################################################################################
+##########################################################################################
+
+# Gene Annotate
+# Apply for both parous and nulliparous separately
+# Acquire reference genes annotation from NCBI: wget http://hgdownload.soe.ucsc.edu/goldenPath/hg19/database/refGene.txt.gz
+# GRCh37 (hg19) was used
+system("wget http://hgdownload.soe.ucsc.edu/goldenPath/hg19/database/refGene.txt.gz")
+system("gunzip refGene.txt.gz")
+refGene <- as.data.frame(read.table("refGene.bed",header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+
+# Parous (Filtered CNVRs)
+system("awk '{print $3"\t"$5"\t"$6"\t"$13}' refGene.txt | sort -n -k2 > refGene.bed")
+write.table(as.data.frame(result.parity.common.cnvr.filtered), file = "result_parity_common_cnvr_filtered.bed",  sep = "\t",row.names = F, quote = F, col.names = F)
+system("bedtools intersect -a result_parity_common_cnvr_filtered.bed -b refGene.bed -wao > annotatated_parity_cnvr_filtered.bed")
+annotatated.parity.cnvr.filtered <- as.data.frame(read.table("annotatated_parity_cnvr_filtered.bed", header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+colnames(annotatated.parity.cnvr.filtered) <- c("Chr","CNVR_start","CNVR_end", colnames(result.parity.raw[,4:ncol(result.parity.raw)]),"Chr","Gene_start","Gene_end","Gene_ID","Overlaps")
+annotatated.parity.cnvr.filtered <- annotatated.parity.cnvr.filtered[!duplicated(annotatated.parity.cnvr.filtered$Gene_ID),]
+
+##########################################################################################
+##########################################################################################
+
+# Exclude donor E61 (appeared to have hyperchromosomal instability; HCI)
+# CNV  tally without donor E61 (parous)
+# Assuming, result.parous.common.cnvr.filtered was produced
+result.parous.common.cnvr.filtered.exclude_E61 <- result.parous.common.cnvr.filtered
+result.parous.common.cnvr.filtered.exclude_E61 <- pivot_longer(result.parous.common.cnvr.filtered.exclude_E61,cols = colnames(result.parous.common.cnvr.filtered.exclude_E61[,4:ncol(result.parous.common.cnvr.filtered.exclude_E61)]))
+result.parous.common.cnvr.filtered.exclude_E61 <- result.parous.common.cnvr.filtered.exclude_E61[!result.parous.common.cnvr.filtered.exclude_E61$name == "E61",] # HCI donor from parous cohort
+result.parous.common.cnvr.filtered.exclude_E61 <- result.parous.common.cnvr.filtered.exclude_E61[!is.na(result.parous.common.cnvr.filtered.exclude_E61$value),]
+result.parous.common.cnvr.filtered.exclude_E61 <- pivot_wider(result.parous.common.cnvr.filtered.exclude_E61, names_from = name, values_from = value)
+
+write.table(as.data.frame(result.parous.common.cnvr.filtered.exclude_E61), file = "result_parous_filtered_exclude_E61.bed", sep = "\t",row.names = F, quote = F, col.names = F)
+system("bedtools intersect -a result_parous_filtered_exclude_E61.bed -b refGene.bed -wao > annotated_parous_cnvr_filtered.exclude_E61.bed")
+annotatated.parity.cnvr.filtered.exclude_E61 <- as.data.frame(read.table("annotated_parous_cnvr_filtered.exclude_E61.bed", header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+colnames(annotatated.parity.cnvr.filtered.exclude_E61) <- c("Chr","CNVR_start","CNVR_end", colnames(result.parous.common.cnvr.filtered.exclude_E61[,4:ncol(result.parous.common.cnvr.filtered.exclude_E61)]), "Chr","Gene_start","Gene_end","Gene_ID","Overlaps")
+annotatated.parity.cnvr.filtered.exclude_E61 <- annotatated.parity.cnvr.filtered.exclude_E61[!duplicated(annotatated.parity.cnvr.filtered.exclude_E61$Gene_ID),]
+
+##########################################################################################
+##########################################################################################
+
+# Number of CNVs and unique genes post-filter
+# CNVs
+dim(result.parity.common.cnvr.filtered)
+
+# Genes
+length(unique(annotatated.parity.cnvr.filtered$Gene_ID))
+
+##########################################################################################
+##########################################################################################
+
+# Total of CNVR per Donor
+# Apply for parous and nulliparous separately
+cnvr.count.pariry.df.with_na <- data.frame(lapply(data.frame(lapply(as.data.frame(result.parity.common.cnvr.filtered),
+                                                                    function(x){
+                                                                      gsub("CN2",NA,x)
+                                                                    })), function(x){
+                                                                      gsub("CN","",x)
+                                                                    }))
+
+cnvr.count.parity.df.raw <- data.frame(apply(cnvr.count.pariry.df.with_na, 2, function(x) length(which(!is.na(x)))),
+                                       apply(cnvr.count.pariry.df.with_na, 2, function(x) length(which(x <= 1))),
+                                       apply(cnvr.count.pariry.df.with_na, 2, function(x) length(which(x >= 3))))
+
+colnames(cnvr.count.parity.df.raw) <- c("total_cnvr","deletion","amplification")
+cnvr.count.parity.df.raw <- cnvr.count.parity.df.raw[-c(1:3),]
+
+# Merge CNV counts per with clinical data from Cereser et al. (2020)
+# Split into parous and nulliparous cohort into 2 separate DF
+# Ensure that sampleID aligns
+clinical.data <- read.csv("clinical_data.csv", header = T)
+clinical.data.parous <- clinical.data[clinical.data$Parity == "Parous",]
+clinical.data.nulliparous <- clinical.data[clinical.data$Parity == "Nulliparous",]
+clinical.data.parous <- clinical.data.parous[order(clinical.data.parous$Sample, decreasing = F),]
+clinical.data.nulliparous <- clinical.data.nulliparous[order(clinical.data.nulliparous$Sample, decreasing = F),]
+
+cnvr.count.parous.df <- cbind(cnvr.count.parous.df.raw, clinical.data.parous)
+cnvr.count.nulliparous.df <- cbind(cnvr.count.nulliparous.df.raw,clin. clinical.data.nulliparous)
+cnvr.count.parous.df2 <- cnvr.count.parous.df
+cnvr.count.nulliparous.df2 <- cnvr.count.nulliparous.df
+
+cnvr.count.parous.df <- mutate(cnvr.count.parous.df, Year.after.1st.birth = Age - Age.1st.birth)
+cnvr.count.nulliparous.df$Year.after.1st.birth <- NA
+
+###########################################################################
+###########################################################################
+
+# Statistical Tests
+
+# Outliers
+library(outliers)
+grubbs.test(cnvr.count.parous.df$total_cnvr)
+
+# Normality test
+shapiro.test(cnvr.count.parous.df$Age)
+
+library(ggpubr)
+# QQ plot for T-test: sample
+ggqqplot(cnvr.count.parous.df$Age) + labs(title = "Parous: Age") + 
+  theme(plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm"), plot.title = element_text(face = "bold", size = 12),
+        axis.title.x = element_text(face = "bold"), axis.title.y = element_text(face = "bold")) + 
+  xlim(-2,2) + annotate(geom="text", x = -1.5, y = 75, label = paste("P =", round(shapiro.test(cnvr.count.parous.df$Age)$p.value, 3)))
+
+# Student T-test/Mann-Whitney U-test: Example
+
+t.test.age.A <- data.frame(matrix(NA, nrow = 17, ncol = 2))
+t.test.age.A$X1 <- cnvr.count.parous.df$Age
+t.test.age.A[is.na(t.test.age.A)] <- "Parous"
+t.test.age.B <- data.frame(matrix(NA, nrow = 12, ncol = 2))
+t.test.age.B$X1 <- cnvr.count.nulliparous.df$Age
+t.test.age.B[is.na(t.test.age.B)] <- "Nulliparous"
+t.test.age <- rbind(t.test.age.A, t.test.age.B)
+colnames(t.test.age) <- c("Age", "Parity")
+
+# Age T-test (Mann-Whitney)
+t.test.age.plot <- ggboxplot(t.test.age, x = "Parity", y = "Age", color = "Parity", palette = c("#005CAB","#E31B23"),add = "jitter") +  
+  stat_compare_means(aes(label = ..p.signif..), label.x = 1.5, label.y = 80, method = "wilcox.test", comparisons = parity_comparisons) + ylab("Age (yrs)") + xlab("") +
+  theme(plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm"), legend.position = "bottom", 
+        axis.text.x = element_text(angle = 30, hjust=1, face = "bold"),
+        axis.title.y = element_text(face="bold"))
+
+# Summary Table Example
+summary.parous.age <- data.frame(unclass(summary(t.test.age.A$X1)),check.names = FALSE, stringsAsFactors = FALSE)
+summary.nulliparous.age <- data.frame(unclass(summary(t.test.age.B$X1)), check.names = FALSE, stringsAsFactors = FALSE)
+summary.age <- cbind(summary.parous.age, summary.nulliparous.age)
+colnames(summary.age) <-c("Parous","Nulliparous")
+is.num.age <- sapply(summary.age, is.numeric) # round off to 2 decimal places
+summary.age[is.num.age] <- lapply(summary.age[is.num.age], round, 2)
+summary.age <- as.data.frame(t(summary.age))
+colnames(summary.age) <- c("Minimum","1st Quantile","Median", "Mean","3rd Quantile","Maximum")
+summary.age <- ggtexttable(summary.age, theme = ttheme("light"))
+
+# Correlation test example
+# Age vs CNVR
+# Remove parous donors with >10 years gap with last pregnancy and tissue collection
+# Recheck normality in parous cohort
+cnvr.count.parous_exclude_10_yrs <- cnvr.count.parous.df[!cnvr.count.parous.df$Year.after.1st.birth > 10,]
+shapiro.test(cnvr.count.parous_exclude_10_yrs$total_cnvr) # normal
+
+cor_cnvr <- ggplot()+
+  geom_smooth(data = cnvr.count.parous_exclude_10_yrs, aes(x = Age, y = total_cnvr), se = T, method = "lm")+
+  geom_smooth(data = cnvr.count.nulliparous.df, aes(x = Age, y = total_cnvr), se = T, method = "lm", color = "#E31B23", fill = "darkgray")+
+  stat_cor(data = cnvr.count.parous_exclude_10_yrs, aes(x = Age, y = total_cnvr), method = "pearson", p.accuracy = 0.001, r.accuracy = 0.01, label.x = 24, label.y = 40, color = "#005CAB") +
+  stat_cor(data = cnvr.count.nulliparous.df, aes(x = Age, y = total_cnvr), method = "spearman",p.accuracy = 0.001, r.accuracy = 0.01, label.x = 24, label.y = 38.1, color = "#E31B23") +
+  geom_point(data = cnvr.count.parous_exclude_10_yrs, aes(x = Age, y = total_cnvr, fill = Parity), color = "#005CAB") +
+  geom_point(data = cnvr.count.nulliparous.df, aes(x = Age, y = total_cnvr, fill = Parity), color = "#E31B23") +
+  ylim(0,40) + ylab("Total CNVRs per Donor") + xlab("Age (years)") + theme_classic() +
+  theme(legend.title = element_text(size=15, face="bold"), legend.text = element_text(size=12),
+        plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm"), legend.position = "bottom",
+        axis.title.x = element_text(face="bold"),axis.title.y = element_text(face="bold"))
+
+
+###########################################################################
+###########################################################################
+
+# Acquire filtered CNVRs from result.parity.common.cnvr.filtered
+# Identify CNVs that are shared between parous and nulliparous that overlapped by >70%
+# Apply to both groups separately
+# Note: Output from nulliparous and parous are identical
+# Assuming, result_parous_common_cnvr_filtered.bed and result_nulliparous_common_cnvr_filtered.bed are produced from result.parous.common.cnvr.filtered and result.nulliparous.common.cnvr.filtered, respectively
+
+system("bedtools intersect -wa -f 0.7 -r -a result_parous_common_cnvr_filtered.bed -b result_nulliparous_common_cnvr_filtered.bed > cnvr_parous_shared.bed")
+cnvr.parous.shared.df <- as.data.frame(read.table("cnvr_parous_shared.bed",header = FALSE, sep="\t", stringsAsFactors=FALSE, quote=""))
+colnames(cnvr.parous.shared.df) <- colnames(result.parous.common.cnvr.filtered)
+cnvr.parous.shared.df <- cnvr.parous.shared.df[order(cnvr.parous.shared.df$start, decreasing = F),]
+
+system("bedtools intersect -wa -f 0.7 -r -a result_nulliparous_common_cnvr_filtered.bed -b result_parous_common_cnvr_filtered.bed > cnvr_nulliparous_shared.bed")
+cnvr.nulliparous.shared.df <- as.data.frame(read.table("cnvr_nulliparous_shared.bed",header = FALSE, sep="\t", stringsAsFactors=FALSE, quote=""))
+colnames(cnvr.nulliparous.shared.df) <- colnames(result.nulliparous.common.cnvr.filtered)
+cnvr.nulliparous.shared.df <- cnvr.nulliparous.shared.df[order(cnvr.nulliparous.shared.df$start, decreasing = F),]
+
+cnvr.parous.shared.df <- pivot_longer(cnvr.parous.shared.df, cols = colnames(cnvr.parous.shared.df[,4:ncol(cnvr.parous.shared.df)]))
+cnvr.parous.shared.df <- cnvr.parous.shared.df[!is.na(cnvr.parous.shared.df$value),]
+cnvr.parous.shared.df <- cnvr.parous.shared.df %>% add_count(seqnames, start, end, name = "total_cnvr")
+cnvr.parous.shared.df <- pivot_wider(cnvr.parous.shared.df, names_from = name, values_from = value)
+
+cnvr.nulliparous.shared.df <- pivot_longer(cnvr.nulliparous.shared.df, cols = colnames(cnvr.nulliparous.shared.df[,4:ncol(cnvr.nulliparous.shared.df)]))
+cnvr.nulliparous.shared.df <- cnvr.nulliparous.shared.df[!is.na(cnvr.nulliparous.shared.df$value),]
+cnvr.nulliparous.shared.df <- cnvr.nulliparous.shared.df %>% add_count(seqnames, start, end, name = "total_cnvr")
+cnvr.nulliparous.shared.df <- pivot_wider(cnvr.nulliparous.shared.df, names_from = name, values_from = value)
+
+cnvr.parous.shared.df <- mutate(cnvr.parous.shared.df, no_cnvr = 17 - total_cnvr)
+cnvr.nulliparous.shared.df <- mutate(cnvr.nulliparous.shared.df, no_cnvr = 12 - total_cnvr)
+
+## cnvr.nulliparous.shared.df was produced to confirm cnvr.parous.shared.df
+
+###########################################################################
+###########################################################################
+
+# Fisher's exact test for common CNVs
+f.test.CNV <- array(NA, c(nrow(cnvr.intersect.par.df),4)) # cnvr.intersect.nu.df can be used to
+colnames(f.test.CNV)<-c("p.value","odd.ratio","lower.CI","upper.CI")
+f.test.CNV <- as.data.frame(f.test.CNV)
+f.test.CNV$par.chr <- cnvr.parous.shared.df$seqnames
+f.test.CNV$par.start <- cnvr.parous.shared.df$start
+f.test.CNV$par.end <- cnvr.parous.shared.df$end
+f.test.CNV$nul.chr <- cnvr.nulliparous.shared.df$seqnames
+f.test.CNV$nul.start <- cnvr.nulliparous.shared.df$start
+f.test.CNV$nul.end <- cnvr.nulliparous.shared.df$end
+
+for(i in 1:nrow(f.test.CNV)){
+  f.test.CNV.all <- fisher.test(matrix(data = as.numeric(c(cnvr.parous.shared.df[i,c("total_cnvr")], cnvr.nulliparous.shared.df[i,c("total_cnvr")],
+                                                           cnvr.parous.shared.df[i,c("no_cnvr")], cnvr.nulliparous.shared.df[i,c("no_cnvr")])),nrow=2))
+  f.test.CNV$p.value[i] <- f.test.CNV.all$p.value
+  f.test.CNV$odd.ratio[i] <- f.test.CNV.all$estimate[1]
+  f.test.CNV$lower.CI[i] <- f.test.CNV.all$conf.int[c(1)]
+  f.test.CNV$upper.CI[i] <- f.test.CNV.all$conf.int[c(2)]
+}
+
+###########################################################################
+###########################################################################
+
+# Isolate genes common/shared CNVRs for gene-set enrichment analysis
+# shared.cnvrs.all.df <- cnvr.intersect.nul.df
+# Fisher's test, P < 0.05: chr21:9400001-10050000 [2,] and (chr7:74625001-75000000) [9,]
+
+shared.cnvrs.all.df <- cnvr.parous.shared.df # can be pipe using cnvr.intersect.nul.df - results in same enrichment pathways
+shared.cnvrs.df <- shared.cnvrs.all.df[c(2,9),] 
+write.table(as.data.frame(shared.cnvrs.all.df), file = "shared_cnvrs_all.bed", sep = "\t",row.names = F, quote = F, col.names = F) 
+write.table(as.data.frame(shared.cnvrs.df), file = "shared_cnvrs.bed", sep = "\t",row.names = F, quote = F, col.names = F) 
+system("bedtools intersect -wao -a shared_cnvrs.bed -b refGene.bed > annotated_shared_cnvrs.bed")
+annotated.shared.cnvrs <- as.data.frame(read.table("annotated_shared_cnvrs.bed", header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+colnames(annotated.shared.cnvrs) <- c("Chr","CNVR_start","CNVR_end",  colnames(shared.cnvrs.df[,4:ncol(shared.cnvrs.df)]),"Chr","Gene_start","Gene_end","Gene_ID","Overlaps")
+genes.list.shared.cnv.gsea <- as.data.frame(unique(annotated.shared.cnvrs$Gene_ID))
+colnames(genes.list.shared.cnv.gsea) <- "Genes"
+write.csv(genes.list.shared.cnv.gsea, "genes_shared_cnvr_parous_nulliparous_gsea.csv")
+
+# Pipe genes on: Enrichr (https://maayanlab.cloud/Enrichr/)
+
+###########################################################################
+###########################################################################
+
+# Unique CNVRs in Parous + more than 1 donor
+# Apply for parous and nulluparous cohort separately
+# Filter using shared_cnvrs_all.bed
+unique.parity.cnvrs.df <- result.parity.common.cnvr.filtered
+write.table(as.data.frame(unique.parity.cnvrs.df), file = "unique_parity_cnvrs.df",  sep = "\t",row.names = F, quote = F, col.names = F)
+system("bedtools intersect -v -a unique_cnvrs.bed -b shared_cnvrs_all.bed > unique_parity_cnvrs_filtered.bed")
+unique.parity.cnvrs.filtered.bed <- as.data.frame(read.table("unique_parity_cnvrs_filtered.bed", header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+colnames(unique.parity.cnvrs.filtered.bed) <- colnames(result.parity.common.cnvr.filtered)
+unique.parity.cnvrs.filtered.bed <- pivot_longer(unique.parity.cnvrs.filtered.bed,cols = colnames(unique.parity.cnvrs.filtered.bed[,4:ncol(unique.parity.cnvrs.filtered.bed)]))
+unique.parity.cnvrs.filtered.bed <- unique.parity.cnvrs.filtered.bed[!is.na(unique.parity.cnvrs.filtered.bed$value),]
+unique.parity.cnvrs.filtered.bed <- unique.parity.cnvrs.filtered.bed %>% add_count(seqnames, start, end, name = "total_cnvr")
+unique.parity.cnvrs.filtered.bed <- unique.parity.cnvrs.filtered.bed[!unique.parity.cnvrs.filtered.bed$total_cnvr == 1,]
+unique.parity.cnvrs.filtered.bed <- pivot_wider(unique.parity.cnvrs.filtered.bed, names_from = name, values_from = value)
+
+# Annotated unique CNVRs
+write.table(as.data.frame(unique.parity.cnvrs.filtered.bed), file = "unique_parity_cnvrs_filtered_2.bed",sep = "\t",row.names = F, quote = F, col.names = F)
+system("bedtools intersect -wao -a unique_parity_cnvrs_filtered_2.bed -b refGene.bed > annotate.unique_parity_cnvrs_filtered_2.bed")
+annotate.unique.parity.cnvrs.filtered <- as.data.frame(read.table("annot_unique_cnvrs_par.bed", header = FALSE, sep="\t",stringsAsFactors=FALSE, quote=""))
+colnames(annotate.unique.parity.cnvrs.filtered) <- c(colnames(unique.parity.cnvrs.df),"chr","start","end", "Gene_ID","overlaps")
+genes.list.unique.cnv.gsea.parity <- as.data.frame(unique(annotate.unique.parity.cnvrs.filtered$Gene_ID))
+colnames(genes.list.unique.cnv.gsea.parity) <- "Genes"
+write.csv(genes.list.unique.cnv.gsea.parity, "genes_list_unique_cnv_gsea_parity.csv")
+
+###########################################################################
+###########################################################################
+
+# Known pathologic CNVRs
+# Apply for both cohort separately
+# Remove CNVRs that are only detected in 1 donor per cohort
+pathogenic.cnvr.parity.raw.df <- result.parity.common.cnvr.filtered
+pathogenic.cnvr.parity.df <- pivot_longer(pathogenic.cnvr.parity.raw.df,cols = colnames(pathogenic.cnvr.parity.raw.df[,4:ncol(pathogenic.cnvr.parity.raw.df)]))
+pathogenic.cnvr.parity.df <- pathogenic.cnvr.parity.df[!is.na(pathogenic.cnvr.parity.df$value),]
+pathogenic.cnvr.parity.df <- pathogenic.cnvr.parity.df %>% add_count(seqnames, start, end, name = "total_cnvr")
+pathogenic.cnvr.parity.df <- pathogenic.cnvr.parity.df[!pathogenic.cnvr.parity.df$total_cnvr == 1,]
+pathogenic.cnvr.parity.df <- pivot_wider(pathogenic.cnvr.parity.df, names_from = name, values_from = value)
+
+system("wget 'https://ftp.ncbi.nlm.nih.gov/pub/dbVar/sandbox/dbvarhub/hg19/clinvar_pathogenic.bed'")
+pathogenic.cnvr <- as.data.frame(read.table("clinvar_pathogenic.bed", header = F, sep="\t", stringsAsFactors=FALSE, quote=""))
+# Colnames for clinvar_pathogenic.bed are found here: https://ftp.ncbi.nlm.nih.gov/pub/dbVar/sandbox/dbvarhub/hg19/clinvar.as
+colnames(pathogenic.cnvr) <- c("chrom","chromStart","chromEnd","name","score","strand",
+                               "thickStart","thickEnd","reserved","clinical","type",
+                               "length","label","clinvar_name","gene","gene_sym","last_eval",
+                               "pheno_ids",",pheno_list","origin","cyto","review","submitters",
+                               "guidelines","gtr","other_ids",",clinvar_rcv",",call_list")
+
+pathogenic.cnvr[pathogenic.cnvr == ""] <- NA
+pathogenic.cnvr[pathogenic.cnvr == "-"] <- NA
+colnames(pathogenic.cnvr) <- c("seqnames","start","end",colnames(pathogenic.cnvr[,4:ncol(pathogenic.cnvr)]))
+pathogenic.cnvr <- pathogenic.cnvr[,c(1:4,13,26)]
+
+write.table(as.data.frame(pathogenic.cnvr), file = "pathogenic_cnvr.bed", sep = "\t",row.names = F, quote = F, col.names = F) 
+write.table(as.data.frame(pathogenic.cnvr.parity.df), file = "pathogenic_cnvr_parity.bed", sep = "\t",row.names = F, quote = F, col.names = F) 
+
+# Matched pathogenic CNVRs that 100% overlapped with CNVRs per cohort
+system("bedtools intersect -wao -f 1.0 -a pathogenic_cnvr_parity.bed -b pathogenic_cnvr.bed > pathogenic_parity.bed")
+pathogenic.parity.mapped <- as.data.frame(read.table("pathogenic_parity.bed", header = FALSE, sep="\t", stringsAsFactors=FALSE, quote=""))
+colnames(pathogenic.parity.mapped) <- c(colnames(pathogenic.cnvr.parity.df),colnames(pathogenic.cnvr), "overlaps")
+pathogenic.parity.mapped <- pathogenic.parity.mapped[!duplicated(pathogenic.parity.mapped$name),]
+pathogenic.parity.mapped <- pathogenic.parity.mapped[!duplicated(pathogenic.parity.mapped$label),]
+
+###########################################################################
+###########################################################################
